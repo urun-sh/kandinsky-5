@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="./configs/k5_lite_t2v_5s_sft_sd.yaml",
+        default="./configs/k5_pro_t2v_10s_sft_hd.yaml",
         help="The config file of the model"
     )
     parser.add_argument(
@@ -71,21 +71,21 @@ def parse_args():
     parser.add_argument(
         "--width",
         type=int,
-        default=768,
+        default=1280,
         choices=[512, 640, 768, 896, 1152, 1024, 1280],
         help="Width of the video in pixels"
     )
     parser.add_argument(
         "--height",
         type=int,
-        default=512,
+        default=768,
         choices=[512, 640, 768, 896, 1152, 1024, 1280],
         help="Height of the video in pixels"
     )
     parser.add_argument(
         "--video_duration",
         type=int,
-        default=5,
+        default=10,
         help="Duratioin of the video in seconds"
     )
     parser.add_argument(
@@ -225,46 +225,160 @@ if __name__ == "__main__":
         else:
             args.output_filename = args.output_filename + ".mp4"
 
-    start_time = time.perf_counter()
-    if "t2i" in args.config:
-        x = pipe(args.prompt,
-                 width=args.width,
-                 height=args.height,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 expand_prompts=args.expand_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed)
-    elif "i2i" in args.config:
-        x = pipe(args.prompt,
-                 image=args.image,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 expand_prompts=args.expand_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed)
-    elif "i2v" in args.config:
-        x = pipe(args.prompt,
-                 image=args.image,
-                 time_length=args.video_duration,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 expand_prompts=args.expand_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed)
+    import copy
+    import time
+
+    import torch
+
+    def print_menu():
+        print("\n" + "=" * 40)
+        print(" Kandinsky TUI Generator ")
+        print("=" * 40)
+        print("Enter your generation settings below:")
+        print("  (Press Enter to keep default/current values)")
+        print("-" * 40)
+
+    # Helper function to broadcast python objects (strings, ints, etc) to all ranks
+    def broadcast_obj(obj, src=0):
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            # Convert obj to string for broadcast (most robust for arbitrary python objects)
+            import pickle
+            obj_bytes = pickle.dumps(obj)
+            obj_size = torch.tensor([len(obj_bytes)], dtype=torch.int64, device="cuda")
+            torch.distributed.broadcast(obj_size, src)
+            # Prepare buffer
+            buf = torch.empty(obj_size.item(), dtype=torch.uint8, device="cuda")
+            if torch.distributed.get_rank() == src:
+                buf[:] = torch.tensor(list(obj_bytes), dtype=torch.uint8, device="cuda")
+            torch.distributed.broadcast(buf, src)
+            if torch.distributed.get_rank() != src:
+                obj_bytes = bytes(buf.cpu().tolist())
+                obj = pickle.loads(obj_bytes)
+        return obj
+
+    def get_input(prompt_str, current_val, _type=str, rank0=True):
+        if rank0:
+            prompt_full = f"{prompt_str} [{current_val}]: "
+            inp = input(prompt_full)
+            if inp.strip() == "":
+                result = current_val
+            else:
+                try:
+                    result = _type(inp)
+                except Exception as e:
+                    print(f"Invalid input ({e}), using current value.")
+                    result = current_val
+        else:
+            result = None  # will receive from rank 0
+        return broadcast_obj(result, src=0)
+
+    # Determine distributed setup
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        is_rank0 = rank == 0
     else:
-        x = pipe(args.prompt,
-                 time_length=args.video_duration,
-                 width=args.width,
-                 height=args.height,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 expand_prompts=args.expand_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed)
-    print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-    print(f"Generated file is saved to {args.output_filename}")
+        rank = 0
+        is_rank0 = True
+
+    # For safety, as args will be mutated
+    current_args = copy.deepcopy(args)
+
+    while True:
+        if is_rank0:
+            print_menu()
+        # Prompt for all relevant arguments interactively (input only on rank0 and broadcast!)
+        current_args.prompt = get_input("Prompt", current_args.prompt, str, rank0=is_rank0)
+
+        if (
+            "t2i" in current_args.config
+            or "i2i" in current_args.config
+            or not ("t2i" in current_args.config or "i2i" in current_args.config or "i2v" in current_args.config)
+        ):
+            current_args.width = get_input("Width", current_args.width, int, rank0=is_rank0)
+            current_args.height = get_input("Height", current_args.height, int, rank0=is_rank0)
+        if "i2i" in current_args.config or "i2v" in current_args.config:
+            current_args.image = get_input("Image path", current_args.image, str, rank0=is_rank0)
+        if "i2v" in current_args.config or not ("t2i" in current_args.config or "i2i" in current_args.config or "i2v" in current_args.config):
+            current_args.video_duration = get_input("Video duration (s)", current_args.video_duration, int, rank0=is_rank0)
+        current_args.sample_steps = get_input("Sample steps", current_args.sample_steps, int, rank0=is_rank0)
+        current_args.guidance_weight = get_input("Guidance weight", current_args.guidance_weight, float, rank0=is_rank0)
+        current_args.scheduler_scale = get_input("Scheduler scale", current_args.scheduler_scale, float, rank0=is_rank0)
+        current_args.expand_prompt = get_input(
+            "Expand prompt (True/False)", current_args.expand_prompt,
+            lambda x: x.lower() in ["true", "1", "yes", "y"], rank0=is_rank0
+        )
+        current_args.seed = get_input("Seed", current_args.seed, int, rank0=is_rank0)
+        out_fn = get_input("Output filename", current_args.output_filename, str, rank0=is_rank0)
+        current_args.output_filename = out_fn
+
+        if is_rank0:
+            print("\nGenerating... Please wait.")
+        torch.distributed.barrier() if torch.distributed.is_available() and torch.distributed.is_initialized() else None
+        # Only for timing print, use rank0
+        if is_rank0:
+            start_time = time.perf_counter()
+
+        if "t2i" in current_args.config:
+            x = pipe(
+                current_args.prompt,
+                width=current_args.width,
+                height=current_args.height,
+                num_steps=current_args.sample_steps,
+                guidance_weight=current_args.guidance_weight,
+                scheduler_scale=current_args.scheduler_scale,
+                expand_prompts=current_args.expand_prompt,
+                save_path=current_args.output_filename,
+                seed=current_args.seed,
+            )
+        elif "i2i" in current_args.config:
+            x = pipe(
+                current_args.prompt,
+                image=current_args.image,
+                num_steps=current_args.sample_steps,
+                guidance_weight=current_args.guidance_weight,
+                scheduler_scale=current_args.scheduler_scale,
+                expand_prompts=current_args.expand_prompt,
+                save_path=current_args.output_filename,
+                seed=current_args.seed,
+            )
+        elif "i2v" in current_args.config:
+            x = pipe(
+                current_args.prompt,
+                image=current_args.image,
+                time_length=current_args.video_duration,
+                num_steps=current_args.sample_steps,
+                guidance_weight=current_args.guidance_weight,
+                scheduler_scale=current_args.scheduler_scale,
+                expand_prompts=current_args.expand_prompt,
+                save_path=current_args.output_filename,
+                seed=current_args.seed,
+            )
+        else:
+            x = pipe(
+                current_args.prompt,
+                time_length=current_args.video_duration,
+                width=current_args.width,
+                height=current_args.height,
+                num_steps=current_args.sample_steps,
+                guidance_weight=current_args.guidance_weight,
+                scheduler_scale=current_args.scheduler_scale,
+                expand_prompts=current_args.expand_prompt,
+                save_path=current_args.output_filename,
+                seed=current_args.seed,
+            )
+
+        if is_rank0:
+            elapsed = time.perf_counter() - start_time
+            print(f"\n\033[92mTIME ELAPSED: {elapsed:.2f} seconds\033[0m")
+            print(f"\033[94mGenerated file saved to: {current_args.output_filename}\033[0m")
+            print("\nWould you like to generate another file? (Y/n)")
+            again = input("> ").strip().lower()
+        else:
+            again = None
+        again = broadcast_obj(again, src=0)
+        if again and again != "y" and again != "yes":
+            if is_rank0:
+                print("Goodbye!")
+            break
+

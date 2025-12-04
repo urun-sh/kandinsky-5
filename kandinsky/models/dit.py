@@ -141,7 +141,7 @@ class DiffusionTransformer3D(nn.Module):
         text_rope = self.text_rope_embeddings(text_rope_pos)
         return text_embed, time_embed, text_rope, visual_embed
 
-    @torch.compile()
+    # @torch.compile()
     def before_visual_transformer_blocks(self, visual_embed, visual_rope_pos, scale_factor,
                                          sparse_params):
         visual_shape = visual_embed.shape[:-1]
