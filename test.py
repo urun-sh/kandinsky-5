@@ -8,6 +8,8 @@ import torch
 from kandinsky.utils import set_hf_token
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_T2I_pipeline, get_I2I_pipeline
 
+import lovely_tensors as lt
+lt.monkey_patch()
 
 def validate_args(args):
     size = (args.width, args.height)
@@ -47,7 +49,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="./configs/k5_pro_t2v_10s_sft_hd.yaml",
+        default="./configs/k5_pro_t2v_5s_sft_sd.yaml",
         help="The config file of the model"
     )
     parser.add_argument(
@@ -71,27 +73,27 @@ def parse_args():
     parser.add_argument(
         "--width",
         type=int,
-        default=1280,
+        default=768,
         choices=[512, 640, 768, 896, 1152, 1024, 1280],
         help="Width of the video in pixels"
     )
     parser.add_argument(
         "--height",
         type=int,
-        default=768,
+        default=512,
         choices=[512, 640, 768, 896, 1152, 1024, 1280],
         help="Height of the video in pixels"
     )
     parser.add_argument(
         "--video_duration",
         type=int,
-        default=10,
+        default=5,
         help="Duratioin of the video in seconds"
     )
     parser.add_argument(
         "--expand_prompt",
         type=int,
-        default=1,
+        default=0,
         help="Whether to use prompt expansion."
     )
     parser.add_argument(

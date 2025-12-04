@@ -26,6 +26,7 @@ model:
     - 32
     - 48
     - 48
+    # visual_cond: false
     visual_cond: true
   attention:
     type: nabla

@@ -59,6 +59,7 @@ class TransformerDecoderBlock(nn.Module):
         self.feed_forward = FeedForward(model_dim, ff_dim)
 
     def forward(self, visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask=None):
+        print(visual_embed.shape, text_embed.shape, time_embed.shape, rope.shape, sparse_params, attention_mask)
         self_attn_params, cross_attn_params, ff_params = torch.chunk(
             self.visual_modulation(time_embed), 3, dim=-1
         )
@@ -131,7 +132,7 @@ class DiffusionTransformer3D(nn.Module):
 
         self.out_layer = OutLayer(model_dim, time_dim, out_visual_dim, patch_size)
 
-    #@torch.compile()
+    @torch.compile()
     def before_text_transformer_blocks(self, text_embed, time, pooled_text_embed, x,
                                        text_rope_pos):
         text_embed = self.text_embeddings(text_embed)
@@ -141,7 +142,7 @@ class DiffusionTransformer3D(nn.Module):
         text_rope = self.text_rope_embeddings(text_rope_pos)
         return text_embed, time_embed, text_rope, visual_embed
 
-    # @torch.compile()
+    @torch.compile()
     def before_visual_transformer_blocks(self, visual_embed, visual_rope_pos, scale_factor,
                                          sparse_params):
         visual_shape = visual_embed.shape[:-1]
@@ -177,7 +178,9 @@ class DiffusionTransformer3D(nn.Module):
         visual_embed, visual_shape, to_fractal, visual_rope = self.before_visual_transformer_blocks(
             visual_embed, visual_rope_pos, scale_factor, sparse_params)
 
-        for visual_transformer_block in self.visual_transformer_blocks:
+        for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
+            print(i, visual_embed.shape, text_embed.shape, time_embed.shape, visual_rope.shape, sparse_params, attention_mask)
+            # torch.distributed.breakpoint(1)
             visual_embed = visual_transformer_block(visual_embed, text_embed, time_embed,
                                                     visual_rope, sparse_params, attention_mask)
 

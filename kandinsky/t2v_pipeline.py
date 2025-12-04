@@ -166,6 +166,7 @@ class Kandinsky5T2VPipeline:
 
         shape = (1, num_frames, height // 8, width // 8, 16)
 
+        print(self.local_dit_rank, caption)
         # GENERATION
         images = generate_sample(
             shape,

@@ -38,7 +38,7 @@ def parallelize_dit(model, tp_mesh):
                     output_layouts=Replicate(),
                 ),
                 "self_attention_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "self_attention.to_query": ColwiseParallel(
                     input_layouts=Replicate(),
@@ -50,16 +50,16 @@ def parallelize_dit(model, tp_mesh):
                     input_layouts=Replicate(),
                 ),
                 "self_attention.query_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "self_attention.key_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "self_attention.out_layer": RowwiseParallel(
                     output_layouts=Replicate(),
                 ),
                 "cross_attention_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "cross_attention.to_query": ColwiseParallel(
                     input_layouts=Replicate(),
@@ -71,16 +71,16 @@ def parallelize_dit(model, tp_mesh):
                     input_layouts=Replicate(),
                 ),
                 "cross_attention.query_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "cross_attention.key_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "cross_attention.out_layer": RowwiseParallel(
                     output_layouts=Replicate(),
                 ),
                 "feed_forward_norm": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
+                    sequence_dim=1, use_local_output=True
                 ),
                 "feed_forward.in_layer": ColwiseParallel(),
                 "feed_forward.out_layer": RowwiseParallel(),
@@ -102,84 +102,185 @@ def parallelize_dit(model, tp_mesh):
 
     return model
 
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor.parallel import parallelize_module, PrepareModuleInput, PrepareModuleOutput
 
 def parallelize_seq(model, tp_mesh):
-    if tp_mesh.size() > 1:
-        plan_in = {
-            "out_layer": PrepareModuleInput(
-                    input_layouts=(Replicate(), None, None),
-                    desired_input_layouts=(Shard(1), None, None),
-                    use_local_output=True
-                ),
-            }
-        parallelize_module(model, tp_mesh, plan_in)
-        plan_out = {
-            "visual_embeddings": PrepareModuleOutput(
-                output_layouts=(Shard(1)),
-                desired_output_layouts=(Replicate()),
-                )
+    if tp_mesh.size() <= 1:
+        return model
+        
+    # Input/output sharding for the full model
+    plan_in = {
+        "out_layer": PrepareModuleInput(
+            input_layouts=(Replicate(), None, None),
+            desired_input_layouts=(Shard(1), None, None),
+            use_local_output=True
+        ),
+    }
+    parallelize_module(model, tp_mesh, plan_in)
+    
+    plan_out = {
+        "visual_embeddings": PrepareModuleOutput(
+            output_layouts=(Shard(1),),  # ← Fixed: trailing comma
+            desired_output_layouts=(Replicate(),),  # ← Fixed: trailing comma
+        )
+    }
+    parallelize_module(model, tp_mesh, plan_out)
+
+    for i, block in enumerate(model.visual_transformer_blocks):
+        plan = {
+            "self_attention_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+            
+            # Q/K/V: ColwiseParallel shards the output (heads)
+            "self_attention.to_query": ColwiseParallel(),
+            "self_attention.to_key": ColwiseParallel(),
+            "self_attention.to_value": ColwiseParallel(),
+            
+            # Output projection: RowwiseParallel takes head-sharded input, all-reduces output
+            "self_attention.out_layer": RowwiseParallel(),
+            
+            "cross_attention_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+            "cross_attention.to_query": ColwiseParallel(),
+            "cross_attention.to_key": ColwiseParallel(),
+            "cross_attention.to_value": ColwiseParallel(),
+            "cross_attention.out_layer": RowwiseParallel(),
+            
+            # "self_attention.to_query": PrepareModuleOutput(
+            #     output_layouts=(Shard(1)), desired_output_layouts=(Shard(-1))
+            # ),
+            # "self_attention.to_key": PrepareModuleOutput(
+            #     output_layouts=(Shard(1)), desired_output_layouts=(Shard(-1))
+            # ),
+            # "self_attention.to_value": PrepareModuleOutput(
+            #     output_layouts=(Shard(1)), desired_output_layouts=(Shard(-1))
+            # ),
+            # "self_attention.out_layer": PrepareModuleInput(
+            #     input_layouts=(Shard(-1)),
+            #     desired_input_layouts=(Shard(1)),
+            #     use_local_output=True,
+            # ),
+            # "cross_attention_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+            # "cross_attention.to_query": PrepareModuleOutput(
+            #     output_layouts=(Shard(1)), desired_output_layouts=(Shard(-1))
+            # ),
+            # "cross_attention.to_key": PrepareModuleOutput(
+            #     output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
+            # ),
+            # "cross_attention.to_value": PrepareModuleOutput(
+            #     output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
+            # ),
+            # "cross_attention.out_layer": PrepareModuleInput(
+            #     input_layouts=(Shard(-1)),
+            #     desired_input_layouts=(Shard(1)),
+            #     use_local_output=True,
+            # ),
+            "feed_forward_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
         }
-        parallelize_module(model, tp_mesh, plan_out)
-
-        for i, block in enumerate(model.visual_transformer_blocks):
-            plan = {
-                "self_attention_norm": SequenceParallel(sequence_dim=0, use_local_output=True),
-                "self_attention.to_query": PrepareModuleOutput(
-                    output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
-                ),
-                "self_attention.to_key": PrepareModuleOutput(
-                    output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
-                ),
-                "self_attention.to_value": PrepareModuleOutput(
-                    output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
-                ),
-                "self_attention.out_layer": PrepareModuleInput(
-                    input_layouts=(Shard(-1)),
-                    desired_input_layouts=(Shard(0)),
+        
+        # Adjust attention heads
+        block.self_attention.num_heads //= tp_mesh.size()
+        block.cross_attention.num_heads //= tp_mesh.size()
+        
+        parallelize_module(block, tp_mesh, plan)
+        
+        if i == 0:
+            parallelize_module(
+                block, tp_mesh,
+                PrepareModuleInput(
+                    input_layouts=(Replicate(), None, None, None, None, None),
+                    desired_input_layouts=(Shard(1), None, None, None, None, None),
                     use_local_output=True,
                 ),
-                "cross_attention_norm": SequenceParallel(sequence_dim=0, use_local_output=True),
-                "cross_attention.to_query": PrepareModuleOutput(
-                    output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
+            )
+        
+        if i == len(model.visual_transformer_blocks) - 1:
+            parallelize_module(
+                block, tp_mesh,
+                PrepareModuleOutput(
+                    output_layouts=(Shard(1),),  # ← Fixed: trailing comma
+                    desired_output_layouts=(Replicate(),),
                 ),
-                "cross_attention.to_key": PrepareModuleOutput(
-                    output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
-                ),
-                "cross_attention.to_value": PrepareModuleOutput(
-                    output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
-                ),
-                "cross_attention.out_layer": PrepareModuleInput(
-                    input_layouts=(Shard(-1)),
-                    desired_input_layouts=(Shard(0)),
-                    use_local_output=True,
-                ),
-                "feed_forward_norm": SequenceParallel(sequence_dim=0, use_local_output=True),
-            }
-            self_attn = block.self_attention
-            self_attn.num_heads = self_attn.num_heads // tp_mesh.size()
-            cross_attn = block.cross_attention
-            cross_attn.num_heads = cross_attn.num_heads // tp_mesh.size()
-            parallelize_module(block, tp_mesh, plan)
-            #shard input of first block and idx for all blocks
-            if i == 0:
-                parallelize_module(
-                    block,
-                    tp_mesh,
-                    PrepareModuleInput(
-                        input_layouts=(Replicate(),None,None,None,None, None),
-                        desired_input_layouts=(Shard(0),None,None,None,None, None),
-                        use_local_output=True,
-                    ),
-                )
-
-            if i == len(model.visual_transformer_blocks)-1:
-                parallelize_module(
-                    block,
-                    tp_mesh,
-                    PrepareModuleOutput(
-                        output_layouts=(Shard(0)),
-                        desired_output_layouts=(Replicate())
-                    ),
-                )        
+            )
 
     return model
+
+# def parallelize_seq(model, tp_mesh):
+#     if tp_mesh.size() > 1:
+#         plan_in = {
+#             "out_layer": PrepareModuleInput(
+#                     input_layouts=(Replicate(), None, None),
+#                     desired_input_layouts=(Shard(1), None, None),
+#                     use_local_output=True
+#                 ),
+#             }
+#         parallelize_module(model, tp_mesh, plan_in)
+#         plan_out = {
+#             "visual_embeddings": PrepareModuleOutput(
+#                 output_layouts=(Shard(1)),
+#                 desired_output_layouts=(Replicate()),
+#                 )
+#         }
+#         parallelize_module(model, tp_mesh, plan_out)
+
+#         for i, block in enumerate(model.visual_transformer_blocks):
+#             plan = {
+#                 "self_attention_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+#                 "self_attention.to_query": PrepareModuleOutput(
+#                     output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "self_attention.to_key": PrepareModuleOutput(
+#                     output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "self_attention.to_value": PrepareModuleOutput(
+#                     output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "self_attention.out_layer": PrepareModuleInput(
+#                     input_layouts=(Shard(-1)),
+#                     desired_input_layouts=(Shard(0)),
+#                     use_local_output=True,
+#                 ),
+#                 "cross_attention_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+#                 "cross_attention.to_query": PrepareModuleOutput(
+#                     output_layouts=(Shard(0)), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "cross_attention.to_key": PrepareModuleOutput(
+#                     output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "cross_attention.to_value": PrepareModuleOutput(
+#                     output_layouts=(Replicate()), desired_output_layouts=(Shard(-1))
+#                 ),
+#                 "cross_attention.out_layer": PrepareModuleInput(
+#                     input_layouts=(Shard(-1)),
+#                     desired_input_layouts=(Shard(0)),
+#                     use_local_output=True,
+#                 ),
+#                 "feed_forward_norm": SequenceParallel(sequence_dim=1, use_local_output=True),
+#             }
+#             self_attn = block.self_attention
+#             self_attn.num_heads = self_attn.num_heads // tp_mesh.size()
+#             cross_attn = block.cross_attention
+#             cross_attn.num_heads = cross_attn.num_heads // tp_mesh.size()
+#             parallelize_module(block, tp_mesh, plan)
+#             #shard input of first block and idx for all blocks
+#             if i == 0:
+#                 parallelize_module(
+#                     block,
+#                     tp_mesh,
+#                     PrepareModuleInput(
+#                         input_layouts=(Replicate(),None,None,None,None, None),
+#                         desired_input_layouts=(Shard(0),None,None,None,None, None),
+#                         use_local_output=True,
+#                     ),
+#                 )
+
+#             if i == len(model.visual_transformer_blocks)-1:
+#                 parallelize_module(
+#                     block,
+#                     tp_mesh,
+#                     PrepareModuleOutput(
+#                         output_layouts=(Shard(0)),
+#                         desired_output_layouts=(Replicate())
+#                     ),
+#                 )        
+
+#     return model

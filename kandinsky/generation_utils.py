@@ -168,6 +168,7 @@ def generate(
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
+            
         pred_velocity = get_velocity(
             model,
             model_input,
